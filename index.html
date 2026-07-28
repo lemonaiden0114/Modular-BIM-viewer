@@ -424,7 +424,7 @@
       <label class="btn-add" for="file-input" style="margin: 0;">
         <span>파일 추가</span>
       </label>
-      <input type="file" id="file-input" accept=".obj,.dxf,.json" multiple />
+      <input type="file" id="file-input" accept=".obj,.dxf,.json,.gltf,.glb" multiple />
       <button class="btn-add" id="btn-save-project" style="background: #3a4250; color: #eef1f6; margin: 0;"><span>저장</span></button>
 
       <div class="instructions" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #2f3744;">
@@ -552,6 +552,7 @@
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/TransformControls.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/OBJLoader.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/dxf-parser@1.1.2/dist/dxf-parser.js"></script>
 
 <script>
@@ -1142,7 +1143,7 @@ function updateUI() {
     propOpacityInput.value = currentOp;
     propOpacityVal.textContent = Math.round(currentOp * 100) + '%';
 
-    if (root.userData.type === 'obj') {
+    if (root.userData.type === 'obj' || root.userData.type === 'gltf') {
       propColorRow.style.display = 'flex'; propLayers.style.display = 'none';
       const c = root.userData.color || '#ffffff';
       propColorInput.value = c; propColorHex.textContent = c.toUpperCase();
@@ -1182,8 +1183,8 @@ function updateUI() {
     propOpacityInput.value = currentOp;
     propOpacityVal.textContent = Math.round(currentOp * 100) + '%';
 
-    const allObj = selectedRoots.every(r => r.userData.type === 'obj');
-    if (allObj) {
+    const allObjOrGltf = selectedRoots.every(r => r.userData.type === 'obj' || r.userData.type === 'gltf');
+    if (allObjOrGltf) {
       propColorRow.style.display = 'flex';
       propColorInput.value = selectedRoots[0].userData.color || '#ffffff';
       propColorHex.textContent = '다중 선택됨';
@@ -1296,7 +1297,6 @@ propOpacityInput.addEventListener('change', () => {
   if (opacityHistoryPending) { pushHistory({ type: 'opacity', changes: oldOpacities }); opacityHistoryPending = false; }
 });
 
-// 투명도 조절 이벤트
 propOpacityInput.addEventListener('input', e => {
   if (selectedRoots.length === 0) return;
   if (!opacityHistoryPending) {
@@ -1354,7 +1354,7 @@ propColorInput.addEventListener('input', e => {
   const hex = e.target.value; 
   propColorHex.textContent = hex.toUpperCase(); 
   selectedRoots.forEach(root => {
-    if (root.userData.type !== 'obj') return;
+    if (root.userData.type !== 'obj' && root.userData.type !== 'gltf') return;
     root.userData.color = hex;
     root.traverse(c => {
       if (c.isMesh && c.material) {
@@ -1606,6 +1606,41 @@ function processLoadedOBJ(obj, filename, rawContent) {
   finalizeLoad(obj);
 }
 
+// GLTF / GLB 파서 처리 로직
+function processLoadedGLTF(gltf, filename, rawBufferOrString) {
+  const obj = gltf.scene || gltf.scenes[0];
+  obj.userData.rawContent = rawBufferOrString;
+  obj.userData.isRoot = true; 
+  obj.userData.id = idSeq++; 
+  obj.userData.name = filename; 
+  obj.userData.type = 'gltf';
+
+// GLB의 m 단위를 기존 OBJ의 mm 단위에 맞춰 1000배 확대시키기
+  obj.scale.set(1000, 1000, 1000);
+
+  const nativeCenter = computeMeshOffsetCenter(obj);
+  const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x000000, linewidth: 1 });
+
+  obj.traverse(c => {
+    if (c.isMesh) {
+      const mats = Array.isArray(c.material) ? c.material : [c.material];
+      mats.forEach(m => {
+        m.polygonOffset = true;
+        m.polygonOffsetFactor = obj.userData.id * -1;
+        m.polygonOffsetUnits = obj.userData.id * -1;
+      });
+      c.geometry.translate(-nativeCenter.x, -nativeCenter.y, -nativeCenter.z);
+
+      const edgesGeo = new THREE.EdgesGeometry(c.geometry, 25);
+      const line = new THREE.LineSegments(edgesGeo, edgeMaterial);
+      c.add(line);
+    }
+  });
+
+  obj.position.copy(nativeCenter);
+  finalizeLoad(obj);
+}
+
 function processLoadedDXF(dxfObj, filename, rawContent) {
   const res = DXFToThree(dxfObj);
   const obj = res.container;
@@ -1634,28 +1669,33 @@ function finalizeLoad(obj) {
 }
 
 async function handleFiles(files) {
-  const validFiles = Array.from(files).filter(f => f.name.match(/\.(obj|dxf|json)$/i));
+  const validFiles = Array.from(files).filter(f => f.name.match(/\.(obj|dxf|json|gltf|glb)$/i));
   if (!validFiles.length) return;
   document.getElementById('loading').className = 'visible';
   for (const f of validFiles) {
     try {
       const ext = f.name.split('.').pop().toLowerCase();
-      const txt = await new Promise((res,rej)=>{const r=new FileReader();r.onload=e=>res(e.target.result);r.readAsText(f);});
-      if (ext === 'json') {
-        const data = JSON.parse(txt);
-        loadProject(data);
-      } else if (ext === 'obj') {
-        const obj = new THREE.OBJLoader().parse(txt);
-        processLoadedOBJ(obj, f.name.replace(/\.[^/.]+$/, ""), txt);
+      
+      if (ext === 'glb' || ext === 'gltf') {
+        const buffer = await new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.readAsArrayBuffer(f); });
+        new THREE.GLTFLoader().parse(buffer, '', gltf => processLoadedGLTF(gltf, f.name.replace(/\.[^/.]+$/, ""), buffer));
       } else {
-        processLoadedDXF(new DxfParser().parseSync(txt), f.name.replace(/\.[^/.]+$/, ""), txt);
+        const txt = await new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.readAsText(f); });
+        if (ext === 'json') {
+          const data = JSON.parse(txt);
+          loadProject(data);
+        } else if (ext === 'obj') {
+          const obj = new THREE.OBJLoader().parse(txt);
+          processLoadedOBJ(obj, f.name.replace(/\.[^/.]+$/, ""), txt);
+        } else if (ext === 'dxf') {
+          processLoadedDXF(new DxfParser().parseSync(txt), f.name.replace(/\.[^/.]+$/, ""), txt);
+        }
       }
     } catch (e) { alert(`로드 실패: ${f.name}`); console.error(e); }
   }
   document.getElementById('loading').className = '';
 }
 
-// 프로젝트 저장 함수 (투명도 보존 적용)
 function saveProject() {
   const data = roots.map(r => {
     const currentOpacity = r.userData.opacity !== undefined ? r.userData.opacity : 1.0;
@@ -1697,15 +1737,17 @@ function loadProject(data) {
     } else if (item.type === 'dxf') {
       const parsed = new DxfParser().parseSync(item.rawContent);
       processLoadedDXF(parsed, item.name, item.rawContent);
+    } else if (item.type === 'gltf') {
+      new THREE.GLTFLoader().parse(item.rawContent, '', gltf => processLoadedGLTF(gltf, item.name, item.rawContent));
     }
 
     const newObj = roots[roots.length - 1];
+    if (!newObj) return;
     newObj.position.set(item.position.x, item.position.y, item.position.z);
 
     if (item.tableData) newObj.userData.tableData = item.tableData;
     if (item.colWidths) newObj.userData.colWidths = item.colWidths;
     
-    // 투명도 복원
     if (item.opacity !== undefined) {
         newObj.userData.opacity = item.opacity;
         newObj.traverse(c => {
@@ -1724,7 +1766,7 @@ function loadProject(data) {
         });
     }
 
-    if (item.type === 'obj' && item.color) {
+    if ((item.type === 'obj' || item.type === 'gltf') && item.color) {
         newObj.userData.color = item.color;
         newObj.traverse(c => {
             if (c.isMesh && c.material) {
@@ -1883,25 +1925,35 @@ document.getElementById('bg-color').addEventListener('input', e => {
 </script>
 
 <script>
-// --- models.json 파일로부터 자동 로드 처리 (.json, .obj, .dxf 모두 분기 지원) ---
+// --- models.json 파일로부터 자동 로드 처리 (.glb / .gltf 분기 로직 추가) ---
 async function loadModelFromURL(url, filename) {
   try {
     document.getElementById('loading').classList.add('visible');
     
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-    const text = await response.text();
-    
     const ext = filename.split('.').pop().toLowerCase();
-    if (ext === 'obj') {
-      const obj = new THREE.OBJLoader().parse(text);
-      processLoadedOBJ(obj, filename.replace(/\.[^/.]+$/, ""), text);
-    } else if (ext === 'dxf') {
-      const parsed = new DxfParser().parseSync(text);
-      processLoadedDXF(parsed, filename.replace(/\.[^/.]+$/, ""), text);
-    } else if (ext === 'json') {
-      const data = JSON.parse(text);
-      loadProject(data);
+    
+    if (ext === 'glb' || ext === 'gltf') {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const buffer = await response.arrayBuffer();
+      new THREE.GLTFLoader().parse(buffer, '', gltf => {
+        processLoadedGLTF(gltf, filename.replace(/\.[^/.]+$/, ""), buffer);
+      });
+    } else {
+      const response = await fetch(url);
+      if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+      const text = await response.text();
+      
+      if (ext === 'obj') {
+        const obj = new THREE.OBJLoader().parse(text);
+        processLoadedOBJ(obj, filename.replace(/\.[^/.]+$/, ""), text);
+      } else if (ext === 'dxf') {
+        const parsed = new DxfParser().parseSync(text);
+        processLoadedDXF(parsed, filename.replace(/\.[^/.]+$/, ""), text);
+      } else if (ext === 'json') {
+        const data = JSON.parse(text);
+        loadProject(data);
+      }
     }
   } catch (e) {
     console.error(`자동 로드 실패: ${filename}`, e);
