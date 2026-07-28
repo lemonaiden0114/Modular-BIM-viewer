@@ -1869,7 +1869,7 @@ document.getElementById('bg-color').addEventListener('input', e => {
 </script>
 
 <script>
-// --- models.json 파일로부터 자동 로드 처리 ---
+// --- models.json 파일로부터 자동 로드 처리 (JSON 호환 추가) ---
 async function loadModelFromURL(url, filename) {
   try {
     document.getElementById('loading').classList.add('visible');
@@ -1879,12 +1879,17 @@ async function loadModelFromURL(url, filename) {
     const text = await response.text();
     
     const ext = filename.split('.').pop().toLowerCase();
+    
     if (ext === 'obj') {
       const obj = new THREE.OBJLoader().parse(text);
       processLoadedOBJ(obj, filename.replace(/\.[^/.]+$/, ""), text);
     } else if (ext === 'dxf') {
       const parsed = new DxfParser().parseSync(text);
       processLoadedDXF(parsed, filename.replace(/\.[^/.]+$/, ""), text);
+    } else if (ext === 'json') {
+      // JSON 확장자 처리: 프로젝트 저장 데이터(saveProject 결과물) 파싱
+      const data = JSON.parse(text);
+      loadProject(data);
     }
   } catch (e) {
     console.error(`자동 로드 실패: ${filename}`, e);
@@ -1896,7 +1901,7 @@ async function loadModelFromURL(url, filename) {
 window.addEventListener('DOMContentLoaded', async () => {
   try {
     const response = await fetch('models.json');
-    if (!response.ok) return; // models.json 파일이 없으면 패스
+    if (!response.ok) return; // models.json 파일이 없으면 무시
     
     const modelFiles = await response.json();
     for (const file of modelFiles) {
