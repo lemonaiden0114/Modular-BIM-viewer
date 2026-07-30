@@ -354,6 +354,22 @@
       border-color: #5c88fc;
       color: #fff;
     }
+    .section-status {
+      background: #12151b;
+      border: 1px solid #2f3744;
+      border-radius: 5px;
+      padding: 8px 10px;
+      color: #cbd5e1;
+      font-family: monospace;
+      font-size: 0.68rem;
+      line-height: 1.7;
+    }
+    .section-status strong { color: #86aaff; }
+    .section-hint {
+      color: #8b95a5;
+      font-size: 0.66rem;
+      line-height: 1.5;
+    }
     .toggle-row {
       display: flex;
       align-items: center;
@@ -395,6 +411,10 @@
         <span class="icon">📋</span>
         <span>객체 리스트</span>
       </button>
+      <button class="topbar-btn" id="btn-toggle-move" title="객체 이동 모드: 비활성화">
+        <span class="icon">✥</span>
+        <span>객체 이동</span>
+      </button>
       <button class="topbar-btn">
         <span class="icon">📏</span>
         <span>거리 측정</span>
@@ -411,7 +431,7 @@
         <span class="icon">📑</span>
         <span>일람표</span>
       </button>
-      <button class="topbar-btn">
+      <button class="topbar-btn" id="btn-toggle-settings">
         <span class="icon">⚙️</span>
         <span>환경 설정</span>
       </button>
@@ -429,7 +449,7 @@
 
       <div class="instructions" style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #2f3744;">
         • 개체 선택: 클릭 또는 좌클릭 드래그 (박스 선택)<br>
-        • 그룹 이동: 선택된 개체 좌클릭 드래그<br>
+        • 그룹 이동: <span>객체 이동 버튼 활성화 후</span> 선택 객체 좌클릭 드래그<br>
         • 다중 선택: <span>Shift</span> + 클릭 / 드래그<br>
         • <span>Delete: 삭제</span> | <span>우클릭: 뷰 회전</span>
       </div>
@@ -493,6 +513,37 @@
           <span class="slider"></span>
         </label>
       </div>
+      <div class="toggle-row">
+        <span>단면 기즈모 표시</span>
+        <label class="switch">
+          <input type="checkbox" id="sec-gizmo-visible" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="section-title" style="margin-top: 2px; margin-bottom: 0;">현재 단면</div>
+      <div class="section-status" id="section-status">
+        <div>축: <strong>Z</strong></div>
+        <div>방향: <strong>-Z</strong></div>
+        <div>위치: <strong>0.00</strong></div>
+      </div>
+      <div class="section-hint">기즈모 화살표를 드래그하거나 아래 위치 값을 입력해 절단 위치를 조정합니다.</div>
+      <div class="coord-container" id="sec-position-control">
+        <div class="coord-box" style="flex: 1;"><span id="sec-pos-axis">Z</span><input type="number" id="sec-position" step="0.01" value="0.00"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="settings-popup" class="side-popup">
+    <div class="section-title">VIEW SETTINGS</div>
+    <div class="section-options">
+      <div class="toggle-row">
+        <span>모델 외곽선 표시</span>
+        <label class="switch">
+          <input type="checkbox" id="edge-enable" checked>
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="instructions">외곽선을 끄면 대형 GLB 모델의 렌더링 성능이 향상될 수 있습니다.</div>
     </div>
   </div>
 
@@ -541,9 +592,7 @@
   <main id="viewer">
     <canvas id="three-canvas"></canvas>
     <div id="selection-box"></div>
-    <div id="drop-overlay">
-      <div class="icon">📂</div>
-    </div>
+    <div id="drop-overlay" class="hidden" aria-hidden="true"></div>
     <div id="loading">⏳ 로딩 중...</div>
     <div id="axis-badge"></div>
   </main>
@@ -630,9 +679,11 @@ scene.add(new THREE.AmbientLight(0xffffff, 0.6));
 const dl1 = new THREE.DirectionalLight(0xffffff, 0.8); dl1.position.set(20,40,20); scene.add(dl1);
 const dl2 = new THREE.DirectionalLight(0xaaccff, 0.4); dl2.position.set(-20,10,-20); scene.add(dl2);
 
-const gridMat = new THREE.MeshBasicMaterial({ color: 0x3b4456, transparent: true, opacity: 0.3, side: THREE.DoubleSide });
+// 시작 화면을 비우기 위해 기준 평면은 렌더링하지 않음.
+const gridMat = new THREE.MeshBasicMaterial({ color: 0x3b4456, transparent: true, opacity: 0, side: THREE.DoubleSide });
 const gridPlane = new THREE.Mesh(new THREE.PlaneGeometry(100,100), gridMat);
-gridPlane.rotation.x = Math.PI/2;
+gridPlane.rotation.x = Math.PI / 2;
+gridPlane.visible = false;
 scene.add(gridPlane);
 
 const roots = [];
@@ -641,6 +692,7 @@ let idSeq = 1;
 
 let isDraggingBox = false;
 let isDraggingObjects = false;
+let moveModeEnabled = false;
 let startMousePixel = new THREE.Vector2();
 let currentMousePixel = new THREE.Vector2();
 let dragStartPosMap = new Map();
@@ -661,9 +713,21 @@ const clipPlane = new THREE.Plane(new THREE.Vector3(0, -1, 0), 0);
 let currentSecAxis = 'z';
 let secFlipped = false;
 
-const secGizmoGeo = new THREE.PlaneGeometry(20, 20);
-const secGizmoMat = new THREE.MeshBasicMaterial({ color: 0x5c88fc, side: THREE.DoubleSide, transparent: true, opacity: 0.25, depthWrite: false });
+const secGizmoGeo = new THREE.PlaneGeometry(1, 1);
+const secGizmoMat = new THREE.MeshBasicMaterial({
+  color: 0x5c88fc,
+  side: THREE.DoubleSide,
+  transparent: true,
+  opacity: 0.08,
+  depthWrite: false
+});
 const secGizmo = new THREE.Mesh(secGizmoGeo, secGizmoMat);
+const secGizmoEdge = new THREE.LineSegments(
+  new THREE.EdgesGeometry(secGizmoGeo),
+  new THREE.LineBasicMaterial({ color: 0x7da6ff, transparent: true, opacity: 0.95, depthTest: false })
+);
+secGizmoEdge.renderOrder = 998;
+secGizmo.add(secGizmoEdge);
 secGizmo.visible = false;
 scene.add(secGizmo);
 
@@ -679,10 +743,46 @@ transformControl.addEventListener('dragging-changed', event => {
 });
 
 transformControl.addEventListener('change', () => {
-  if (secGizmo.visible) {
+  if (document.getElementById('sec-enable').checked) {
     updateClipPlane();
+    updateSectionUI();
   }
 });
+
+let secGizmoDisplayEnabled = true;
+
+function getSectionCoordinate() {
+  if (currentSecAxis === 'x') return secGizmo.position.x;
+  if (currentSecAxis === 'y') return secGizmo.position.z;
+  return secGizmo.position.y;
+}
+
+function setSectionCoordinate(value) {
+  if (currentSecAxis === 'x') secGizmo.position.x = value;
+  else if (currentSecAxis === 'y') secGizmo.position.z = value;
+  else secGizmo.position.y = value;
+  updateClipPlane();
+  updateSectionUI();
+}
+
+function updateSectionUI() {
+  const axis = currentSecAxis.toUpperCase();
+  const direction = (secFlipped ? '+' : '-') + axis;
+  const value = getSectionCoordinate();
+  const status = document.getElementById('section-status');
+  const posInput = document.getElementById('sec-position');
+  const axisLabel = document.getElementById('sec-pos-axis');
+  if (status) status.innerHTML = `<div>축: <strong>${axis}</strong></div><div>방향: <strong>${direction}</strong></div><div>위치: <strong>${value.toFixed(2)}</strong></div>`;
+  if (posInput && document.activeElement !== posInput) posInput.value = value.toFixed(2);
+  if (axisLabel) axisLabel.textContent = axis;
+}
+
+function updateSectionGizmoVisibility() {
+  const enabled = document.getElementById('sec-enable').checked;
+  secGizmo.visible = enabled && secGizmoDisplayEnabled;
+  transformControl.visible = enabled && secGizmoDisplayEnabled;
+  transformControl.enabled = enabled && secGizmoDisplayEnabled;
+}
 
 function updateClipPlane() {
   const normal = new THREE.Vector3();
@@ -706,6 +806,7 @@ function updateSecGizmoOrientation() {
     transformControl.showX = false; transformControl.showY = true; transformControl.showZ = false;
   }
   updateClipPlane();
+  updateSectionUI();
 }
 
 function applyClippingPlanes(root) {
@@ -1065,11 +1166,12 @@ document.getElementById('btn-add-col').addEventListener('click', () => {
 });
 
 function updateTablePopup() {
-  if (selectedRoots.length === 1) {
+  // 속성 데이터 창은 객체 리스트 패널이 열려 있을 때만 표시한다.
+  const isListPanelOpen = listPopupEl && listPopupEl.style.display === 'flex';
+  if (selectedRoots.length === 1 && isListPanelOpen) {
     if (!isTablePopupClosedManually) {
       const isNewlyOpened = tablePopup.style.display === 'none' || tablePopup.style.display === '';
       tablePopup.style.display = 'flex';
-      
       if (isNewlyOpened) {
         setTimeout(() => {
           const listRect = listPopupEl.getBoundingClientRect();
@@ -1081,7 +1183,7 @@ function updateTablePopup() {
     buildTableUI(selectedRoots[0]);
   } else {
     tablePopup.style.display = 'none';
-    isTablePopupClosedManually = false; 
+    if (selectedRoots.length !== 1) isTablePopupClosedManually = false;
   }
 }
 
@@ -1114,12 +1216,8 @@ function updateUI() {
     listEl.appendChild(item);
   });
 
-  if (selectedRoots.length >= 1) {
-    listPopupEl.style.display = 'flex';
-    filePopupEl.style.display = 'none';
-    sectionPopupEl.style.display = 'none';
-    document.getElementById('btn-toggle-section').classList.remove('active');
-  }
+  // 객체 선택 상태와 무관하게 객체 리스트 패널은 자동으로 열지 않음.
+  // 상단의 객체 리스트 버튼으로만 패널을 표시함.
 
   if (selectedRoots.length === 1) {
     propBox.style.display = 'flex';
@@ -1384,6 +1482,9 @@ viewer.addEventListener('pointerdown', e => {
       return; 
     }
 
+    // 이동 모드가 꺼진 경우에는 선택만 수행하고 이동하지 않음
+    if (!moveModeEnabled) return;
+
     isDraggingObjects = true;
     const snapInfo = getSnappedVertex(hit.rawHit);
 
@@ -1562,9 +1663,12 @@ function fitCameraToScene() {
   controls.target.copy(center); 
   controls.update();
 
-  secGizmo.scale.set(maxDim * 0.15, maxDim * 0.15, maxDim * 0.15);
+  // 모델을 가리지 않도록 단면 기즈모를 바운딩 박스보다 약간만 크게 설정
+  const gizmoSize = Math.max(maxDim * 0.055, 1);
+  secGizmo.scale.set(gizmoSize, gizmoSize, gizmoSize);
   secGizmo.position.copy(center);
   updateClipPlane();
+  updateSectionUI();
 }
 
 function processLoadedOBJ(obj, filename, rawContent) {
@@ -1588,6 +1692,8 @@ function processLoadedOBJ(obj, filename, rawContent) {
 
       const edgesGeo = new THREE.EdgesGeometry(c.geometry, 25);
       const line = new THREE.LineSegments(edgesGeo, edgeMaterial);
+      line.userData.isModelEdge = true;
+      line.visible = document.getElementById('edge-enable') ? document.getElementById('edge-enable').checked : true;
       c.add(line);
     }
   });
@@ -1620,6 +1726,8 @@ function processLoadedGLTF(gltf, filename, rawBufferOrString) {
 
       const edgesGeo = new THREE.EdgesGeometry(c.geometry, 25);
       const line = new THREE.LineSegments(edgesGeo, edgeMaterial);
+      line.userData.isModelEdge = true;
+      line.visible = document.getElementById('edge-enable') ? document.getElementById('edge-enable').checked : true;
       c.add(line);
     }
   });
@@ -1849,20 +1957,65 @@ document.getElementById('bg-color').addEventListener('input', e => {
 <script>
   const btnToggleFile = document.getElementById('btn-toggle-file');
   const btnToggleList = document.getElementById('btn-toggle-list');
+  const btnToggleMove = document.getElementById('btn-toggle-move');
   const btnToggleSection = document.getElementById('btn-toggle-section');
+  const btnToggleSettings = document.getElementById('btn-toggle-settings');
+  const settingsPopupEl = document.getElementById('settings-popup');
+  const edgeEnableInput = document.getElementById('edge-enable');
+
+  function setModelEdgesVisible(visible) {
+    roots.forEach(root => root.traverse(child => {
+      if (child.userData && child.userData.isModelEdge) child.visible = visible;
+    }));
+  }
+
+  edgeEnableInput.addEventListener('change', e => setModelEdgesVisible(e.target.checked));
+
+  btnToggleSettings.addEventListener('click', () => {
+    const willOpen = settingsPopupEl.style.display === 'none' || settingsPopupEl.style.display === '';
+    settingsPopupEl.style.display = willOpen ? 'flex' : 'none';
+    btnToggleSettings.classList.toggle('active', willOpen);
+    filePopupEl.style.display = 'none';
+    listPopupEl.style.display = 'none';
+    sectionPopupEl.style.display = 'none';
+    btnToggleSection.classList.remove('active');
+    updateTablePopup();
+  });
+
+  btnToggleMove.addEventListener('click', () => {
+    moveModeEnabled = !moveModeEnabled;
+    btnToggleMove.classList.toggle('active', moveModeEnabled);
+    btnToggleMove.title = moveModeEnabled
+      ? '객체 이동 모드: 활성화'
+      : '객체 이동 모드: 비활성화';
+
+    if (!moveModeEnabled) {
+      isDraggingObjects = false;
+      dragStartPosMap.clear();
+      axisBadge.style.display = 'none';
+      controls.enabled = true;
+    }
+  });
 
   btnToggleFile.addEventListener('click', () => {
     filePopupEl.style.display = (filePopupEl.style.display === 'none' || filePopupEl.style.display === '') ? 'flex' : 'none';
     listPopupEl.style.display = 'none';
     sectionPopupEl.style.display = 'none';
+    settingsPopupEl.style.display = 'none';
     btnToggleSection.classList.remove('active');
+    btnToggleSettings.classList.remove('active');
+    updateTablePopup();
   });
 
   btnToggleList.addEventListener('click', () => {
-    listPopupEl.style.display = (listPopupEl.style.display === 'none' || listPopupEl.style.display === '') ? 'flex' : 'none';
-    filePopupEl.style.display = 'none'; 
+    const willOpen = listPopupEl.style.display === 'none' || listPopupEl.style.display === '';
+    listPopupEl.style.display = willOpen ? 'flex' : 'none';
+    filePopupEl.style.display = 'none';
     sectionPopupEl.style.display = 'none';
+    settingsPopupEl.style.display = 'none';
     btnToggleSection.classList.remove('active');
+    btnToggleSettings.classList.remove('active');
+    updateTablePopup();
   });
 
   btnToggleSection.addEventListener('click', () => {
@@ -1871,17 +2024,26 @@ document.getElementById('bg-color').addEventListener('input', e => {
     btnToggleSection.classList.toggle('active', !isVisible);
     filePopupEl.style.display = 'none';
     listPopupEl.style.display = 'none';
+    settingsPopupEl.style.display = 'none';
+    btnToggleSettings.classList.remove('active');
+    updateTablePopup();
   });
 
   document.getElementById('sec-enable').addEventListener('change', e => {
-    const enabled = e.target.checked;
-    secGizmo.visible = enabled;
-    transformControl.visible = enabled;
-    transformControl.enabled = enabled;
-    if (enabled) {
-      updateSecGizmoOrientation();
-    }
+    if (e.target.checked) updateSecGizmoOrientation();
+    updateSectionGizmoVisibility();
+    updateSectionUI();
     refreshAllClipping();
+  });
+
+  document.getElementById('sec-gizmo-visible').addEventListener('change', e => {
+    secGizmoDisplayEnabled = e.target.checked;
+    updateSectionGizmoVisibility();
+  });
+
+  document.getElementById('sec-position').addEventListener('input', e => {
+    const value = parseFloat(e.target.value);
+    if (!Number.isNaN(value)) setSectionCoordinate(value);
   });
 
   const btnSecX = document.getElementById('btn-sec-x');
@@ -1899,10 +2061,12 @@ document.getElementById('bg-color').addEventListener('input', e => {
   btnSecX.addEventListener('click', () => setSecAxis('x'));
   btnSecY.addEventListener('click', () => setSecAxis('y'));
   btnSecZ.addEventListener('click', () => setSecAxis('z'));
+  updateSectionUI();
 
   document.getElementById('sec-flip').addEventListener('change', e => {
     secFlipped = e.target.checked;
     updateClipPlane();
+    updateSectionUI();
   });
 </script>
 
