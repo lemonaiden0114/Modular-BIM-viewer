@@ -1773,7 +1773,7 @@ async function handleFiles(files) {
         const txt = await new Promise((res, rej) => { const r = new FileReader(); r.onload = e => res(e.target.result); r.readAsText(f); });
         if (ext === 'json') {
           const data = JSON.parse(txt);
-          loadProject(data);
+          loadProject(data, true);
         } else if (ext === 'obj') {
           const obj = new THREE.OBJLoader().parse(txt);
           processLoadedOBJ(obj, f.name.replace(/\.[^/.]+$/, ""), txt);
@@ -1814,10 +1814,12 @@ function saveProject() {
   URL.revokeObjectURL(url);
 }
 
-function loadProject(data) {
-  roots.forEach(r => scene.remove(r));
-  roots.length = 0;
-  clearSelection();
+function loadProject(data, replaceExisting = true) {
+  if (replaceExisting) {
+    roots.forEach(r => scene.remove(r));
+    roots.length = 0;
+    clearSelection();
+  }
 
   data.forEach(item => {
     let obj;
@@ -1828,60 +1830,102 @@ function loadProject(data) {
       const parsed = new DxfParser().parseSync(item.rawContent);
       processLoadedDXF(parsed, item.name, item.rawContent);
     } else if (item.type === 'gltf') {
-      new THREE.GLTFLoader().parse(item.rawContent, '', gltf => processLoadedGLTF(gltf, item.name, item.rawContent));
+      new THREE.GLTFLoader().parse(item.rawContent, '', gltf => {
+        processLoadedGLTF(gltf, item.name, item.rawContent);
+        const newObj = roots[roots.length - 1];
+        if (!newObj) return;
+        newObj.position.set(item.position.x, item.position.y, item.position.z);
+        if (item.tableData) newObj.userData.tableData = item.tableData;
+        if (item.colWidths) newObj.userData.colWidths = item.colWidths;
+        if (item.opacity !== undefined) {
+          newObj.userData.opacity = item.opacity;
+          newObj.traverse(c => {
+            if ((c.isMesh || c.isLine) && c.material) {
+              if (!c.userData.materialCloned) {
+                c.material = Array.isArray(c.material) ? c.material.map(m => m.clone()) : c.material.clone();
+                c.userData.materialCloned = true;
+              }
+              const mats = Array.isArray(c.material) ? c.material : [c.material];
+              mats.forEach(m => {
+                m.transparent = item.opacity < 1.0;
+                m.opacity = item.opacity;
+                m.needsUpdate = true;
+              });
+            }
+          });
+        }
+        if (item.color) {
+          newObj.userData.color = item.color;
+          newObj.traverse(c => {
+            if (c.isMesh && c.material) {
+              if (!c.userData.materialCloned) {
+                c.material = Array.isArray(c.material) ? c.material.map(m => m.clone()) : c.material.clone();
+                c.userData.materialCloned = true;
+              }
+              const mats = Array.isArray(c.material) ? c.material : [c.material];
+              mats.forEach(m => m.color.set(item.color));
+            }
+          });
+        }
+        fitCameraToScene();
+        updateUI();
+      });
+      return;
     }
 
     const newObj = roots[roots.length - 1];
     if (!newObj) return;
-    newObj.position.set(item.position.x, item.position.y, item.position.z);
 
+    newObj.position.set(item.position.x, item.position.y, item.position.z);
     if (item.tableData) newObj.userData.tableData = item.tableData;
     if (item.colWidths) newObj.userData.colWidths = item.colWidths;
-    
+
     if (item.opacity !== undefined) {
-        newObj.userData.opacity = item.opacity;
-        newObj.traverse(c => {
-            if ((c.isMesh || c.isLine) && c.material) {
-                if (!c.userData.materialCloned) {
-                    c.material = Array.isArray(c.material) ? c.material.map(m=>m.clone()) : c.material.clone();
-                    c.userData.materialCloned = true;
-                }
-                const mats = Array.isArray(c.material) ? c.material : [c.material];
-                mats.forEach(m => { 
-                  m.transparent = item.opacity < 1.0; 
-                  m.opacity = item.opacity; 
-                  m.needsUpdate = true;
-                });
-            }
-        });
+      newObj.userData.opacity = item.opacity;
+      newObj.traverse(c => {
+        if ((c.isMesh || c.isLine) && c.material) {
+          if (!c.userData.materialCloned) {
+            c.material = Array.isArray(c.material) ? c.material.map(m => m.clone()) : c.material.clone();
+            c.userData.materialCloned = true;
+          }
+          const mats = Array.isArray(c.material) ? c.material : [c.material];
+          mats.forEach(m => {
+            m.transparent = item.opacity < 1.0;
+            m.opacity = item.opacity;
+            m.needsUpdate = true;
+          });
+        }
+      });
     }
 
     if ((item.type === 'obj' || item.type === 'gltf') && item.color) {
-        newObj.userData.color = item.color;
-        newObj.traverse(c => {
-            if (c.isMesh && c.material) {
-                if (!c.userData.materialCloned) {
-                    c.material = Array.isArray(c.material) ? c.material.map(m=>m.clone()) : c.material.clone();
-                    c.userData.materialCloned = true;
-                }
-                const mats = Array.isArray(c.material) ? c.material : [c.material];
-                mats.forEach(m => m.color.set(item.color));
-            }
-        });
+      newObj.userData.color = item.color;
+      newObj.traverse(c => {
+        if (c.isMesh && c.material) {
+          if (!c.userData.materialCloned) {
+            c.material = Array.isArray(c.material) ? c.material.map(m => m.clone()) : c.material.clone();
+            c.userData.materialCloned = true;
+          }
+          const mats = Array.isArray(c.material) ? c.material : [c.material];
+          mats.forEach(m => m.color.set(item.color));
+        }
+      });
     }
 
-    if (item.type === 'dxf' && item.layers && newObj.userData.layers) {
-        Object.entries(item.layers).forEach(([lname, ldata]) => {
-            if (newObj.userData.layers[lname]) {
-                newObj.userData.layers[lname].colorHex = ldata.colorHex;
-                newObj.userData.layers[lname].materials.forEach(m => {
-                    m.color.set(ldata.colorHex);
-                    m.userData.originalColor = m.color.getHex();
-                });
-            }
-        });
+    if (item.type === 'dxf' && item.layers) {
+      newObj.userData.layers = newObj.userData.layers || {};
+      Object.entries(item.layers).forEach(([lname, ldata]) => {
+        if (newObj.userData.layers[lname]) {
+          newObj.userData.layers[lname].colorHex = ldata.colorHex;
+          newObj.userData.layers[lname].materials.forEach(m => {
+            m.color.set(ldata.colorHex);
+            m.userData.originalColor = m.color.getHex();
+          });
+        }
+      });
     }
   });
+
   fitCameraToScene();
   updateUI();
 }
@@ -2072,7 +2116,7 @@ document.getElementById('bg-color').addEventListener('input', e => {
 
 <script>
 // --- models.json 파일로부터 자동 로드 처리 ---
-async function loadModelFromURL(url, filename) {
+async function loadModelFromURL(url, filename, options = {}) {
   try {
     document.getElementById('loading').classList.add('visible');
     
@@ -2110,15 +2154,22 @@ async function loadModelFromURL(url, filename) {
 
 window.addEventListener('DOMContentLoaded', async () => {
   try {
+    const baseProjectUrl = '벽체, 보, 바닥.json';
+    await loadModelFromURL(baseProjectUrl, baseProjectUrl, { appendProjectJson: true, replaceExistingProject: true, suppressAutoModels: true });
+  } catch (e) {
+    console.warn('기본 프로젝트 자동 로드 실패:', e);
+  }
+
+  try {
     const response = await fetch('models.json');
-    if (!response.ok) return; // models.json 파일이 없으면 무시
-    
+    if (!response.ok) return;
     const modelFiles = await response.json();
     for (const file of modelFiles) {
-      await loadModelFromURL(file, file);
+      if (file === '벽체, 보, 바닥.json') continue;
+      await loadModelFromURL(file, file, { appendProjectJson: true, replaceExistingProject: false });
     }
   } catch (e) {
-    console.warn('models.json을 불러오지 못했거나 설정되지 않았습니다.', e);
+    console.warn('models.json 자동 로드 실패:', e);
   }
 });
 </script>
